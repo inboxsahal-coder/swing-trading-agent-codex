@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+trade_log.db
+data/cache/
+analysis_input.json
+analysis_output.json
+analysis_output_ranked.json
+reports/*.md
+
+# archives
+*.zip

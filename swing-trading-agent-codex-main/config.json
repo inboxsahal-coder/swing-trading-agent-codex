@@ -1,0 +1,43 @@
+{
+  "phase": 1,
+  "phases": {
+    "1": {
+      "max_positions": 2,
+      "universe": ["nifty50", "nifty_next50", "nifty_midcap_top100", "nifty_smallcap_top100"],
+      "allow_gold": true,
+      "allow_us_etf": false
+    },
+    "2": {
+      "max_positions": 3,
+      "universe": ["nifty50", "nifty_next50", "nifty_midcap_top100", "nifty_smallcap_top100"],
+      "allow_gold": true,
+      "allow_us_etf": false
+    },
+    "3": {
+      "max_positions": 4,
+      "universe": ["nifty50", "nifty_next50", "nifty_midcap_top100", "nifty_smallcap_top100"],
+      "allow_gold": true,
+      "allow_us_etf": true
+    }
+  },
+  "permanent_reserve_pct": 0.20,
+  "monthly_loss_limit_pct": 0.06,
+  "watchlist_expiry_trading_days": 5,
+  "shadow_book_tracking_days": 15,
+  "learning_loop_trigger_trades": 20,
+  "paper_mode_go_nogo_threshold_pct": 50.0,
+  "sector_pe_medians": {
+    "IT": 28,
+    "BANK": 14,
+    "PHARMA": 32,
+    "FMCG": 48,
+    "AUTO": 22,
+    "METAL": 10,
+    "ENERGY": 12,
+    "REALTY": 35,
+    "INFRA": 20,
+    "PSU_BANK": 9,
+    "DEFENCE": 45,
+    "HEALTHCARE": 38
+  }
+}
