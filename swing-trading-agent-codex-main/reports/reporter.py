@@ -2,6 +2,11 @@ import json
 import os
 import datetime
 
+def _fmt_metric(value, suffix=""):
+    if value is None or value == "":
+        return "NA"
+    return f"{value}{suffix}"
+
 def generate_report(analysis, portfolio_actions, watchlist_hits, watchlist_updates, capital, paper=False):
     lines = []
     mode = "PAPER" if paper else "LIVE"
@@ -72,10 +77,10 @@ def generate_report(analysis, portfolio_actions, watchlist_hits, watchlist_updat
             sector = c.get('sector', '')
             sector_quadrant = sectors.get(sector, {}).get('quadrant', '')
             tier = c.get('tier', '')
-            rsi = c.get('rsi14', 0)
-            adx = c.get('adx14', 0)
-            vol = c.get('volume_ratio', 0)
-            rs = c.get('rs_vs_nifty_20d', 0)
+            rsi = c.get('rsi14')
+            adx = c.get('adx14')
+            vol = c.get('volume_ratio')
+            rs = c.get('rs_vs_nifty_20d')
             vcp = c.get('vcp_detected', False)
 
             entry = c.get('entry', 0)
@@ -101,7 +106,11 @@ def generate_report(analysis, portfolio_actions, watchlist_hits, watchlist_updat
             lines.append("")
             lines.append(f"RANK #{rank} — {c['ticker']} | Score: {score}/10 | {band}")
             lines.append(f"Sector: {sector} ({sector_quadrant}) | Tier: {tier} | Pattern: {entry_type}")
-            lines.append(f"RSI: {rsi}  ADX: {adx}  Vol: {vol}x  RS vs Nifty: {'+' if rs >= 0 else ''}{rs}%")
+            rs_text = "NA" if rs is None else f"{'+' if rs >= 0 else ''}{rs}%"
+            lines.append(
+                f"RSI: {_fmt_metric(rsi)}  ADX: {_fmt_metric(adx)}  "
+                f"Vol: {_fmt_metric(vol, 'x')}  RS vs Nifty: {rs_text}"
+            )
             if vcp:
                 lines.append("  [VCP CONFIRMED]")
             lines.append(f"  ENTRY:     ₹{entry:,.2f} (next trading day — {next_day})")

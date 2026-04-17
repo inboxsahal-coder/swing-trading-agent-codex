@@ -154,7 +154,8 @@ def cmd_run(paper=False):
         sector_rs, fii_data, global_macro,
         vix_today, vix_52wk_avg, fundamentals,
         bhavcopy, results_blackout,
-        active_watchlist, open_positions, config
+        active_watchlist, open_positions, config,
+        capital=capital
     )
 
     print("\n" + "=" * 60)

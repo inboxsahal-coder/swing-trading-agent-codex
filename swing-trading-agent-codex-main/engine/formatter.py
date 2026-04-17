@@ -84,6 +84,7 @@ def build_analysis_input(
     watchlist_items,
     open_positions,
     config,
+    capital=None,
     theme_map=None
 ):
     if theme_map is None:
@@ -222,7 +223,7 @@ def build_analysis_input(
     output = {
         "date": datetime.date.today().isoformat(),
         "run_time": datetime.datetime.now().strftime("%H:%M"),
-        "capital": None,
+        "capital": capital,
         "phase": phase,
         "phase_limits": {
             "max_positions": phase_config.get('max_positions', 2),
