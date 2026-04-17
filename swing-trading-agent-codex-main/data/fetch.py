@@ -7,6 +7,14 @@ import yfinance as yf
 import requests
 from bs4 import BeautifulSoup
 
+NSE_BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nseindia.com/"
+}
+
 def _flatten_df(df):
     """Flatten yfinance 1.x MultiIndex columns to single level."""
     if df is None or df.empty:
@@ -39,6 +47,38 @@ SECTOR_TICKERS = {
 
 os.makedirs("data/cache", exist_ok=True)
 
+def _normalize_symbol(raw):
+    if raw is None:
+        return None
+    s = str(raw).strip().upper()
+    if not s or "NIFTY" in s or " " in s:
+        return None
+    # Common NSE series/suffix patterns returned by some endpoints: HDFCBANKEQN, XYZ-EQ
+    for suffix in ("EQN", "-EQ", ".EQ", " EQ", "EQ"):
+        if s.endswith(suffix) and len(s) > len(suffix):
+            s = s[:-len(suffix)]
+            break
+    if s.endswith(".NS"):
+        s = s[:-3]
+    if s and all(ch.isalnum() or ch in {"&", "-"} for ch in s):
+        return s
+    return None
+
+def _nse_json_get(url, timeout=15):
+    try:
+        with requests.Session() as sess:
+            sess.headers.update(NSE_BROWSER_HEADERS)
+            # Prime cookies/anti-bot context
+            try:
+                sess.get("https://www.nseindia.com", timeout=timeout)
+            except Exception:
+                pass
+            resp = sess.get(url, timeout=timeout)
+            resp.raise_for_status()
+            return resp.json()
+    except Exception:
+        return None
+
 def fetch_universe():
     if NSE_AVAILABLE:
         try:
@@ -48,19 +88,25 @@ def fetch_universe():
             smallcap250 = nse.get_index_details("NIFTY SMALLCAP 250")
 
             def _extract_symbols(df, limit=None):
-                # Try each column — look for one that has >10 string values
+                candidate_series = []
+                # Prefer index first; for nsefin this is usually clean NSE symbols.
+                candidate_series.append(pd.Series(df.index.astype(str)))
+                for col in ['symbol', 'SYMBOL', 'Symbol', 'identifier', 'Identifier']:
+                    if col in df.columns:
+                        candidate_series.append(df[col].dropna().astype(str))
+                # Then scan remaining columns
                 for col in df.columns:
-                    vals = df[col].dropna().astype(str)
-                    # Valid symbols: uppercase letters 1-20 chars, no spaces
-                    valid = vals[vals.str.match(r'^[A-Z&\-\.]{1,20}$')]
+                    if col not in ['symbol', 'SYMBOL', 'Symbol', 'identifier', 'Identifier']:
+                        candidate_series.append(df[col].dropna().astype(str))
+
+                for vals in candidate_series:
+                    normalized = vals.map(_normalize_symbol).dropna()
+                    valid = normalized[normalized.str.match(r'^[A-Z0-9&\-]{1,20}$')]
+                    valid = valid[~valid.str.contains("NIFTY", na=False)]
+                    valid = valid.drop_duplicates()
                     if len(valid) >= 10:
                         result = pd.DataFrame({'symbol': valid.tolist()})
                         return result.head(limit) if limit else result
-                # Try the index itself
-                idx_vals = pd.Series(df.index.astype(str))
-                valid = idx_vals[idx_vals.str.match(r'^[A-Z&\-\.]{1,20}$')]
-                if len(valid) >= 10:
-                    return pd.DataFrame({'symbol': valid.tolist()})
                 raise ValueError(f"Could not extract symbols. Columns: {list(df.columns)}, sample: {df.head(2).to_dict()}")
 
             parts = [
@@ -83,7 +129,11 @@ def fetch_universe():
     return df
 
 def fetch_ohlcv_batch(tickers, period="18mo"):
-    tickers = [str(t) for t in tickers]  # guard against non-string symbols
+    # Guard against malformed symbols and normalize them before querying Yahoo.
+    tickers = [
+        _normalize_symbol(t) for t in [str(t) for t in tickers]
+    ]
+    tickers = [t for t in tickers if t]
     results = {}
     chunks = [tickers[i:i+50] for i in range(0, len(tickers), 50)]
     for idx, chunk in enumerate(chunks):
@@ -129,7 +179,12 @@ def fetch_ohlcv_batch(tickers, period="18mo"):
 def fetch_fii_data():
     if NSE_AVAILABLE:
         try:
-            fii_fn = getattr(nse, 'fii_dii', None) or getattr(nse, 'get_fii_dii', None) or getattr(nse, 'fii_dii_activity', None)
+            fii_fn = (
+                getattr(nse, 'fii_dii', None)
+                or getattr(nse, 'get_fii_dii', None)
+                or getattr(nse, 'fii_dii_activity', None)
+                or getattr(nse, 'get_fii_dii_activity', None)
+            )
             if fii_fn is None:
                 raise AttributeError("No FII method found in nsefin")
             fii_df = fii_fn()
@@ -164,6 +219,42 @@ def fetch_fii_data():
             }
         except Exception as e:
             print(f"nsefin FII failed: {e}")
+    # Direct NSE API fallback
+    try:
+        payload = _nse_json_get("https://www.nseindia.com/api/fiidiiTradeReact")
+        if payload:
+            if isinstance(payload, list):
+                rows = payload
+            elif isinstance(payload, dict):
+                rows = payload.get("data") or payload.get("fiidiiTradeReact") or []
+            else:
+                rows = []
+            if rows:
+                df = pd.DataFrame(rows)
+                # Prefer latest by date desc where available
+                date_col = next((c for c in df.columns if 'date' in str(c).lower()), None)
+                if date_col:
+                    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+                    df = df.sort_values(date_col, ascending=False)
+                if 'category' in df.columns:
+                    fii_rows = df[df['category'].astype(str).str.upper() == 'FII']
+                    if not fii_rows.empty:
+                        df = fii_rows
+                flow_col = next(
+                    (c for c in df.columns if 'fii' in str(c).lower() and 'net' in str(c).lower()),
+                    None
+                ) or next((c for c in df.columns if 'net' in str(c).lower()), None)
+                if flow_col:
+                    flow = pd.to_numeric(df.iloc[0][flow_col], errors='coerce')
+                    if pd.notna(flow):
+                        return {
+                            "flow_crores": round(float(flow), 2),
+                            "streak": None,
+                            "direction": "buying" if float(flow) > 0 else "selling",
+                            "source": "nse_api"
+                        }
+    except Exception as e:
+        print(f"NSE API FII fallback failed: {e}")
     try:
         url = "https://www.moneycontrol.com/stocks/marketstats/fii_dii_activity/index.php"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -205,17 +296,21 @@ def fetch_bhavcopy():
             return bhav
         except Exception as e:
             print(f"nsefin bhavcopy failed: {e}")
-    try:
-        date_str = today.strftime("%d%m%Y")
-        url = f"https://archives.nseindia.com/products/content/sec_bhavdata_full_{date_str}.csv"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        df = pd.read_csv(url, dtype=str, storage_options={"User-Agent": "Mozilla/5.0"})
-        df.to_csv(cache_path, index=False)
-        print("Bhavcopy fetched via NSE archive")
-        return df
-    except Exception as e:
-        print(f"Bhavcopy fetch failed: {e}. Delivery % will be skipped.")
-        return None
+    for i in range(0, 7):
+        try:
+            dt = today - datetime.timedelta(days=i)
+            date_str = dt.strftime("%d%m%Y")
+            url = f"https://archives.nseindia.com/products/content/sec_bhavdata_full_{date_str}.csv"
+            df = pd.read_csv(url, dtype=str, storage_options={"User-Agent": "Mozilla/5.0"})
+            # normalize columns by stripping spaces from legacy files
+            df.columns = [str(c).strip() for c in df.columns]
+            df.to_csv(cache_path, index=False)
+            print(f"Bhavcopy fetched via NSE archive ({dt})")
+            return df
+        except Exception:
+            continue
+    print("Bhavcopy fetch failed for last 7 days. Delivery % will be skipped.")
+    return None
 
 def fetch_results_calendar():
     if NSE_AVAILABLE:
