@@ -132,6 +132,27 @@ def init_db():
         is_active INTEGER DEFAULT 1
     )''')
 
+    c.execute('''CREATE TABLE IF NOT EXISTS run_registry (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT UNIQUE,
+        created_at_utc TEXT,
+        finalized_at_utc TEXT,
+        paper INTEGER DEFAULT 1,
+        provider TEXT,
+        timing_mode TEXT,
+        analysis_input_path TEXT,
+        analysis_output_path TEXT,
+        data_quality_report_path TEXT,
+        compliance_report_path TEXT,
+        bias_report_path TEXT,
+        analysis_input_sha256 TEXT,
+        output_schema_ok INTEGER DEFAULT 0,
+        compliance_pct REAL,
+        recency_bias_avg REAL,
+        status TEXT DEFAULT 'RUN_STARTED',
+        notes TEXT
+    )''')
+
     conn.commit()
     conn.close()
     print("Database initialised.")
@@ -319,3 +340,31 @@ def get_signal_by_ticker(ticker: str):
     row = c.fetchone()
     conn.close()
     return dict(row) if row else None
+
+def upsert_run_registry(run: dict):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('''INSERT INTO run_registry (
+        run_id, created_at_utc, finalized_at_utc, paper, provider, timing_mode,
+        analysis_input_path, analysis_output_path, data_quality_report_path,
+        compliance_report_path, bias_report_path, analysis_input_sha256,
+        output_schema_ok, compliance_pct, recency_bias_avg, status, notes
+    ) VALUES (
+        :run_id, :created_at_utc, :finalized_at_utc, :paper, :provider, :timing_mode,
+        :analysis_input_path, :analysis_output_path, :data_quality_report_path,
+        :compliance_report_path, :bias_report_path, :analysis_input_sha256,
+        :output_schema_ok, :compliance_pct, :recency_bias_avg, :status, :notes
+    )
+    ON CONFLICT(run_id) DO UPDATE SET
+        finalized_at_utc=excluded.finalized_at_utc,
+        analysis_output_path=excluded.analysis_output_path,
+        compliance_report_path=excluded.compliance_report_path,
+        bias_report_path=excluded.bias_report_path,
+        output_schema_ok=excluded.output_schema_ok,
+        compliance_pct=excluded.compliance_pct,
+        recency_bias_avg=excluded.recency_bias_avg,
+        status=excluded.status,
+        notes=excluded.notes
+    ''', run)
+    conn.commit()
+    conn.close()

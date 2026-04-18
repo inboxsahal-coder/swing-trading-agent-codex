@@ -2,6 +2,7 @@ import os
 import json
 import time
 import datetime
+import random
 import pandas as pd
 import yfinance as yf
 import requests
@@ -78,6 +79,21 @@ def _nse_json_get(url, timeout=15):
             return resp.json()
     except Exception:
         return None
+
+def _with_retries(fetch_fn, attempts=3, base_sleep=0.8):
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        try:
+            val = fetch_fn()
+            if val is not None:
+                return val
+        except Exception as e:
+            last_err = e
+        if attempt < attempts:
+            time.sleep(base_sleep * attempt + random.uniform(0, 0.4))
+    if last_err:
+        raise last_err
+    return None
 
 def fetch_universe():
     if NSE_AVAILABLE:
@@ -412,7 +428,9 @@ def fetch_fundamentals(tickers):
             "revenue_q4": None,
             "data_date": None,
             "data_age_days": 999,
-            "sources": []
+            "sources": [],
+            "pe_candidates": [],
+            "de_candidates": []
         }
         ticker_ns = ticker + ".NS"
         quarterly_values = []
@@ -420,9 +438,13 @@ def fetch_fundamentals(tickers):
             yt = yf.Ticker(ticker_ns)
             info = yt.info or {}
             if info.get("trailingPE") is not None:
-                result["pe_ratio"] = float(info.get("trailingPE"))
+                y_pe = float(info.get("trailingPE"))
+                result["pe_ratio"] = y_pe
+                result["pe_candidates"].append({"source": "yfinance", "value": y_pe})
             if info.get("debtToEquity") is not None:
-                result["debt_equity"] = float(info.get("debtToEquity"))
+                y_de = float(info.get("debtToEquity"))
+                result["debt_equity"] = y_de
+                result["de_candidates"].append({"source": "yfinance", "value": y_de})
             quarterly = yt.quarterly_financials
             if quarterly is not None and not quarterly.empty:
                 rev_row = None
@@ -450,6 +472,10 @@ def fetch_fundamentals(tickers):
                 fin = _get_qs_module(yahoo_qs, "financialData")
                 pe = _safe_float(_deep_get(stats, ["trailingPE", "raw"]))
                 de = _safe_float(_deep_get(fin, ["debtToEquity", "raw"]))
+                if pe is not None:
+                    result["pe_candidates"].append({"source": "yahoo_quote_summary", "value": pe})
+                if de is not None:
+                    result["de_candidates"].append({"source": "yahoo_quote_summary", "value": de})
                 if result["pe_ratio"] is None and pe is not None:
                     result["pe_ratio"] = pe
                 if result["debt_equity"] is None and de is not None:
@@ -460,6 +486,8 @@ def fetch_fundamentals(tickers):
         if nse_quote:
             metadata = nse_quote.get("metadata", {}) or {}
             pe = _safe_float(metadata.get("pdSectorPe"))
+            if pe is not None:
+                result["pe_candidates"].append({"source": "nse_quote_equity", "value": pe})
             if result["pe_ratio"] is None and pe is not None:
                 result["pe_ratio"] = pe
             result["sources"].append("nse_quote_equity")
@@ -504,10 +532,12 @@ def _fetch_yahoo_quote_summary(symbol_ns):
         "modules": "assetProfile,financialData,defaultKeyStatistics,incomeStatementHistoryQuarterly"
     }
     try:
-        r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
-        r.raise_for_status()
-        data = r.json()
-        return _deep_get(data, ["quoteSummary", "result", 0]) or {}
+        def _go():
+            r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
+            r.raise_for_status()
+            data = r.json()
+            return _deep_get(data, ["quoteSummary", "result", 0]) or {}
+        return _with_retries(_go, attempts=3, base_sleep=0.7) or {}
     except Exception:
         return {}
 
@@ -576,6 +606,20 @@ def _normalize_sector_name(sector_text):
         ("CAPITAL GOODS", "INFRA"),
         ("DEFENCE", "DEFENCE"),
         ("AEROSPACE", "DEFENCE"),
+        ("CHEMICAL", "CHEMICALS"),
+        ("TEXTILE", "TEXTILES"),
+        ("TELECOM", "TELECOM"),
+        ("MEDIA", "MEDIA"),
+        ("LOGISTICS", "LOGISTICS"),
+        ("TRANSPORT", "LOGISTICS"),
+        ("RETAIL", "CONSUMPTION"),
+        ("CONSUMPTION", "CONSUMPTION"),
+        ("CONSUMER DURABLE", "CONSUMPTION"),
+        ("HOTEL", "HOSPITALITY"),
+        ("TRAVEL", "HOSPITALITY"),
+        ("CEMENT", "INFRA"),
+        ("AGRI", "AGRI"),
+        ("FERTILIZER", "AGRI"),
     ]
     for keyword, normalized in mapping:
         if keyword in s:
@@ -613,11 +657,19 @@ def fetch_sector_classification(tickers):
         if sector:
             sectors[ticker] = {"sector": sector, "source": source}
         else:
+            # Graceful fallback to avoid full-run hard failure on unknown taxonomy.
+            sectors[ticker] = {"sector": "MISC", "source": "fallback_misc"}
             unresolved.append(ticker)
         time.sleep(0.1)
     return sectors, unresolved
 
-def validate_candidate_data_completeness(candidates, fundamentals, dynamic_sectors):
+def validate_candidate_data_completeness(
+    candidates,
+    fundamentals,
+    dynamic_sectors,
+    require_delivery=True,
+    require_sector=True
+):
     blockers = []
     sector_lookup = {}
     for ticker, payload in (dynamic_sectors or {}).items():
@@ -631,9 +683,9 @@ def validate_candidate_data_completeness(candidates, fundamentals, dynamic_secto
         missing = []
         if not ticker:
             continue
-        if c.get("delivery_pct") is None:
+        if require_delivery and c.get("delivery_pct") is None:
             missing.append("delivery_pct")
-        if not sector_lookup.get(ticker):
+        if require_sector and not sector_lookup.get(ticker):
             missing.append("sector")
         if fund.get("pe_ratio") is None:
             missing.append("pe_ratio")

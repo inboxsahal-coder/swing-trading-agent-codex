@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import datetime
+import shutil
 
 def _import_or_none(module_name):
     try:
@@ -29,17 +30,27 @@ def get_ist_time():
     ist = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
     return datetime.datetime.now(ist)
 
-def market_hours_guard():
+def market_hours_guard(timing_mode="post_close_fast"):
     now = get_ist_time()
     market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
     market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
     safe_run = now.replace(hour=20, minute=0, second=0, microsecond=0)
+    if timing_mode == "manual_force":
+        print("Timing mode MANUAL_FORCE: proceeding with latest available data.")
+        return
     if market_open <= now <= market_close:
-        print("Market is open (9:15 AM - 3:30 PM IST). Run after 8 PM for complete EOD data.")
+        print("Market is open (9:15 AM - 3:30 PM IST).")
+        if timing_mode == "eod_strict":
+            print("EOD_STRICT blocks runs during market hours.")
+            sys.exit(0)
+        print("POST_CLOSE_FAST mode can be overridden with --timing-mode manual_force.")
         sys.exit(0)
     elif market_close < now < safe_run:
+        if timing_mode == "eod_strict":
+            print("EOD_STRICT: waiting for 8 PM IST to ensure complete EOD data.")
+            sys.exit(0)
         print("Market closed but data may not be complete yet.")
-        print("Recommended run time: 8 PM IST. Proceeding anyway — partial data will be flagged.")
+        print("POST_CLOSE_FAST mode active — proceeding with partial-data flags.")
 
 def prompt_capital():
     try:
@@ -51,10 +62,23 @@ def prompt_capital():
         print("Invalid capital input. Exiting.")
         sys.exit(1)
 
-def cmd_run(paper=False):
-    market_hours_guard()
+def cmd_run(paper=False, provider="chatgpt_project", timing_mode="post_close_fast"):
+    market_hours_guard(timing_mode=timing_mode)
     config = load_config()
     capital = prompt_capital()
+
+    from engine.handoff import (
+        generate_run_id,
+        file_sha256,
+        write_run_context,
+        write_analysis_request_markdown,
+    )
+    from engine.data_quality import build_data_quality_report, write_data_quality_report
+    from db.database import upsert_run_registry
+
+    run_id = generate_run_id()
+    schema_version = "1.1"
+    utc_now = datetime.datetime.now(datetime.UTC)
 
     from db.database import init_db, get_open_positions, get_active_watchlist
     from data.fetch import (
@@ -151,7 +175,13 @@ def cmd_run(paper=False):
     dynamic_sector_map, unresolved_sectors = fetch_sector_classification(candidate_tickers)
     sector_data = {k: v.get("sector") for k, v in dynamic_sector_map.items()}
 
-    blockers = validate_candidate_data_completeness(candidates, fundamentals, dynamic_sector_map)
+    strict_require_delivery = bool(config.get("require_delivery_pct", False))
+    strict_require_sector = bool(config.get("require_sector_classification", False))
+    blockers = validate_candidate_data_completeness(
+        candidates, fundamentals, dynamic_sector_map,
+        require_delivery=strict_require_delivery,
+        require_sector=strict_require_sector
+    )
     blocked_tickers = {item.get("ticker") for item in blockers if item.get("ticker")}
     eligible_candidates = [c for c in candidates if c.get("ticker") not in blocked_tickers]
     if unresolved_sectors:
@@ -166,7 +196,7 @@ def cmd_run(paper=False):
             with open("data_blockers.json", "w") as f:
                 json.dump(
                     {
-                        "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+                        "generated_at": datetime.datetime.now(datetime.UTC).isoformat(),
                         "total_candidates": len(candidates),
                         "eligible_candidates": len(eligible_candidates),
                         "blocked_candidates": len(blockers),
@@ -180,10 +210,44 @@ def cmd_run(paper=False):
             print(f"Could not write data_blockers.json: {e}")
 
     if not eligible_candidates:
-        print("All candidates failed data completeness checks. Paper run aborted.")
-        sys.exit(1)
+        print("All candidates blocked under strict completeness policy. Retrying in graceful mode...")
+        blockers = validate_candidate_data_completeness(
+            candidates, fundamentals, dynamic_sector_map,
+            require_delivery=False,
+            require_sector=False
+        )
+        blocked_tickers = {item.get("ticker") for item in blockers if item.get("ticker")}
+        eligible_candidates = [c for c in candidates if c.get("ticker") not in blocked_tickers]
+        if not eligible_candidates:
+            print("All candidates failed even in graceful mode. Paper run aborted.")
+            sys.exit(1)
     if blockers:
         print(f"Proceeding with {len(eligible_candidates)} eligible candidates and skipping {len(blockers)} blocked candidates.")
+
+    dq_report = build_data_quality_report(
+        run_id=run_id,
+        candidates=candidates,
+        fundamentals=fundamentals,
+        dynamic_sectors=dynamic_sector_map,
+        blockers=blockers,
+    )
+    dq_run_path = f"data_quality_report_{run_id}.json"
+    write_data_quality_report(dq_report, dq_run_path)
+    write_data_quality_report(dq_report, "data_quality_report.json")
+    dq_summary = {
+        "status": dq_report.get("overall_status"),
+        "complete": "COMPLETE" if dq_report.get("summary", {}).get("complete", 0) > 0 else "PARTIAL",
+        "missing": "COMPLETE" if dq_report.get("summary", {}).get("missing", 0) == 0 else "PARTIAL",
+        "stale": "COMPLETE" if dq_report.get("summary", {}).get("stale", 0) == 0 else "PARTIAL",
+        "conflicted": "COMPLETE" if dq_report.get("summary", {}).get("conflicted", 0) == 0 else "PARTIAL",
+    }
+    print(
+        "Data quality summary:",
+        f"status={dq_report.get('overall_status')},",
+        f"missing={dq_report.get('summary', {}).get('missing', 0)},",
+        f"stale={dq_report.get('summary', {}).get('stale', 0)},",
+        f"conflicted={dq_report.get('summary', {}).get('conflicted', 0)}",
+    )
 
     build_analysis_input(
         eligible_candidates, ohlcv_data, nifty_df, sector_data,
@@ -191,14 +255,58 @@ def cmd_run(paper=False):
         vix_today, vix_52wk_avg, fundamentals,
         bhavcopy, results_blackout,
         active_watchlist, open_positions, config,
-        capital=capital
+        capital=capital,
+        run_metadata={"run_id": run_id, "schema_version": schema_version},
+        data_quality=dq_summary
     )
 
+    analysis_input_hash = file_sha256("analysis_input.json")
+    expected_output = f"analysis_output_{run_id}.json" if provider == "chatgpt_project" else "analysis_output.json"
+    run_context = {
+        "run_id": run_id,
+        "schema_version": schema_version,
+        "provider": provider,
+        "timing_mode": timing_mode,
+        "paper": paper,
+        "analysis_input_path": "analysis_input.json",
+        "analysis_input_sha256": analysis_input_hash,
+        "expected_analysis_output_path": expected_output,
+        "data_quality_report_path": dq_run_path,
+        "created_at_utc": utc_now.isoformat(),
+    }
+    write_run_context(run_context)
+    upsert_run_registry({
+        "run_id": run_id,
+        "created_at_utc": run_context["created_at_utc"],
+        "finalized_at_utc": None,
+        "paper": 1 if paper else 0,
+        "provider": provider,
+        "timing_mode": timing_mode,
+        "analysis_input_path": "analysis_input.json",
+        "analysis_output_path": None,
+        "data_quality_report_path": dq_run_path,
+        "compliance_report_path": None,
+        "bias_report_path": None,
+        "analysis_input_sha256": analysis_input_hash,
+        "output_schema_ok": 0,
+        "compliance_pct": None,
+        "recency_bias_avg": None,
+        "status": "RUN_READY_FOR_ANALYSIS",
+        "notes": f"provider={provider}, timing_mode={timing_mode}",
+    })
+    request_doc = write_analysis_request_markdown(run_context)
+
     print("\n" + "=" * 60)
-    print("analysis_input.json is ready.")
-    print("Now open a NEW Codex session in this directory and say:")
-    print("  Read CODEX.md and analysis_input.json, perform analysis, write analysis_output.json")
-    print("After Codex writes analysis_output.json, come back and run:")
+    print(f"analysis_input.json is ready. run_id={run_id}")
+    print(f"Provider mode: {provider} | Timing mode: {timing_mode}")
+    print(f"Run context saved: run_context.json")
+    print(f"Analysis request saved: {request_doc}")
+    if provider == "chatgpt_project":
+        print("Use your ChatGPT Project and provide CODEX.md + analysis_input.json.")
+        print(f"Ask it to write: {expected_output}")
+    else:
+        print("Use local analysis workflow and write analysis_output.json")
+    print("After analysis output file is written, run:")
     print("  python main.py finalize --paper" if paper else "  python main.py finalize")
     print("=" * 60 + "\n")
 
@@ -206,16 +314,87 @@ def cmd_finalize(paper=False):
     config = load_config()
     capital = prompt_capital()
 
-    from db.database import init_db, get_open_positions, log_signal
+    from engine.handoff import load_run_context, validate_analysis_output
+    from engine.compliance import build_compliance_report, write_compliance_report
+    from engine.bias import build_recency_bias_report, write_recency_bias_report, enrich_analysis_with_bias
+
+    from db.database import init_db, get_open_positions, log_signal, upsert_run_registry
     from engine.ranker import load_and_rank
     from portfolio.portfolio import check_portfolio, get_portfolio_summary
     from reports.reporter import generate_report
 
     init_db()
 
-    if not os.path.exists("analysis_output.json"):
-        print("analysis_output.json not found. Run Codex analysis first.")
+    run_context = load_run_context() or {}
+    expected_run_id = run_context.get("run_id")
+    candidate_outputs = []
+    if run_context.get("expected_analysis_output_path"):
+        candidate_outputs.append(run_context["expected_analysis_output_path"])
+    if expected_run_id:
+        candidate_outputs.append(f"analysis_output_{expected_run_id}.json")
+    candidate_outputs.append("analysis_output.json")
+
+    selected_output = next((p for p in candidate_outputs if p and os.path.exists(p)), None)
+    if not selected_output:
+        print("No analysis output file found.")
+        print("Expected one of:")
+        for p in candidate_outputs:
+            if p:
+                print(f"  - {p}")
         sys.exit(1)
+
+    ok, errors, _ = validate_analysis_output(selected_output, expected_run_id=expected_run_id)
+    if not ok:
+        print(f"analysis output validation failed for {selected_output}")
+        for e in errors:
+            print(f"  - {e}")
+        sys.exit(1)
+
+    if selected_output != "analysis_output.json":
+        shutil.copyfile(selected_output, "analysis_output.json")
+        print(f"Using {selected_output} for finalize (copied to analysis_output.json)")
+
+    with open("analysis_output.json", "r") as f:
+        analysis_payload = json.load(f)
+
+    compliance = build_compliance_report(expected_run_id or "unknown", analysis_payload)
+    compliance_path = f"compliance_report_{expected_run_id}.json" if expected_run_id else "compliance_report_latest.json"
+    write_compliance_report(compliance, compliance_path)
+    write_compliance_report(compliance, "compliance_report_latest.json")
+    min_adherence = float(config.get("compliance_min_pct", 85.0))
+    if compliance.get("adherence_pct", 0.0) < min_adherence:
+        print(
+            f"Compliance gate failed: {compliance.get('adherence_pct')}% < {min_adherence}% "
+            f"(see {compliance_path})"
+        )
+        upsert_run_registry({
+            "run_id": expected_run_id or "unknown",
+            "created_at_utc": None,
+            "finalized_at_utc": datetime.datetime.now(datetime.UTC).isoformat(),
+            "paper": 1 if paper else 0,
+            "provider": (run_context or {}).get("provider"),
+            "timing_mode": (run_context or {}).get("timing_mode"),
+            "analysis_input_path": (run_context or {}).get("analysis_input_path"),
+            "analysis_output_path": selected_output,
+            "data_quality_report_path": (run_context or {}).get("data_quality_report_path"),
+            "compliance_report_path": compliance_path,
+            "bias_report_path": None,
+            "analysis_input_sha256": (run_context or {}).get("analysis_input_sha256"),
+            "output_schema_ok": 1,
+            "compliance_pct": compliance.get("adherence_pct"),
+            "recency_bias_avg": None,
+            "status": "FINALIZE_BLOCKED_COMPLIANCE",
+            "notes": "Compliance threshold failed",
+        })
+        sys.exit(1)
+
+    bias_report = build_recency_bias_report(expected_run_id or "unknown", analysis_payload)
+    bias_path = f"recency_bias_report_{expected_run_id}.json" if expected_run_id else "recency_bias_report_latest.json"
+    write_recency_bias_report(bias_report, bias_path)
+    write_recency_bias_report(bias_report, "recency_bias_report_latest.json")
+    analysis_payload = enrich_analysis_with_bias(analysis_payload, bias_report)
+    with open("analysis_output.json", "w") as f:
+        json.dump(analysis_payload, f, indent=2)
 
     open_positions = get_open_positions(paper=paper)
     analysis = load_and_rank(capital, config, open_positions, paper=paper)
@@ -277,6 +456,25 @@ def cmd_finalize(paper=False):
     generate_report(
         analysis, portfolio_actions, [], [], capital, paper=paper
     )
+    upsert_run_registry({
+        "run_id": expected_run_id or "unknown",
+        "created_at_utc": None,
+        "finalized_at_utc": datetime.datetime.now(datetime.UTC).isoformat(),
+        "paper": 1 if paper else 0,
+        "provider": (run_context or {}).get("provider"),
+        "timing_mode": (run_context or {}).get("timing_mode"),
+        "analysis_input_path": (run_context or {}).get("analysis_input_path"),
+        "analysis_output_path": selected_output,
+        "data_quality_report_path": (run_context or {}).get("data_quality_report_path"),
+        "compliance_report_path": compliance_path,
+        "bias_report_path": bias_path,
+        "analysis_input_sha256": (run_context or {}).get("analysis_input_sha256"),
+        "output_schema_ok": 1,
+        "compliance_pct": compliance.get("adherence_pct"),
+        "recency_bias_avg": (bias_report.get("summary") or {}).get("avg_recency_ratio"),
+        "status": "FINALIZED",
+        "notes": "Finalize complete",
+    })
 
 def cmd_portfolio():
     config = load_config()
@@ -500,8 +698,8 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     if not args:
         print("Usage:")
-        print("  python main.py run           — full EOD run")
-        print("  python main.py run --paper   — paper trading mode")
+        print("  python main.py run [--provider chatgpt_project|local_file] [--timing-mode eod_strict|post_close_fast|manual_force]         — full EOD run")
+        print("  python main.py run --paper [--provider chatgpt_project|local_file] [--timing-mode eod_strict|post_close_fast|manual_force] — paper trading mode")
         print("  python main.py finalize      — after Codex writes analysis_output.json")
         print("  python main.py finalize --paper")
         print("  python main.py portfolio     — portfolio check")
@@ -519,7 +717,29 @@ if __name__ == "__main__":
     try:
         if cmd == "run":
             paper = "--paper" in args
-            cmd_run(paper=paper)
+            provider = "chatgpt_project"
+            timing_mode = "post_close_fast"
+            if "--provider" in args:
+                i = args.index("--provider")
+                if i + 1 >= len(args):
+                    print("Usage: python main.py run [--paper] [--provider chatgpt_project|local_file]")
+                    sys.exit(1)
+                provider = args[i + 1].strip().lower()
+            if "--timing-mode" in args:
+                i = args.index("--timing-mode")
+                if i + 1 >= len(args):
+                    print("Usage: python main.py run [--paper] [--timing-mode eod_strict|post_close_fast|manual_force]")
+                    sys.exit(1)
+                timing_mode = args[i + 1].strip().lower()
+            if provider not in ("chatgpt_project", "local_file"):
+                print(f"Unsupported provider: {provider}")
+                print("Allowed: chatgpt_project, local_file")
+                sys.exit(1)
+            if timing_mode not in ("eod_strict", "post_close_fast", "manual_force"):
+                print(f"Unsupported timing mode: {timing_mode}")
+                print("Allowed: eod_strict, post_close_fast, manual_force")
+                sys.exit(1)
+            cmd_run(paper=paper, provider=provider, timing_mode=timing_mode)
         elif cmd == "finalize":
             paper = "--paper" in args
             cmd_finalize(paper=paper)
