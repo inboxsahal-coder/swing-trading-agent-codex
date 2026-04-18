@@ -152,17 +152,41 @@ def cmd_run(paper=False):
     sector_data = {k: v.get("sector") for k, v in dynamic_sector_map.items()}
 
     blockers = validate_candidate_data_completeness(candidates, fundamentals, dynamic_sector_map)
+    blocked_tickers = {item.get("ticker") for item in blockers if item.get("ticker")}
+    eligible_candidates = [c for c in candidates if c.get("ticker") not in blocked_tickers]
     if unresolved_sectors:
         print(f"Data completeness blocker: unresolved sectors for {len(unresolved_sectors)} tickers")
     if blockers:
-        print("\nDATA COMPLETENESS BLOCKERS DETECTED")
+        print("\nDATA COMPLETENESS BLOCKERS DETECTED (skipping blocked tickers)")
         for item in blockers[:20]:
             print(f"  - {item['ticker']}: missing {', '.join(item['missing'])}")
-        print("Paper run aborted. Resolve data blockers and rerun.")
+        if len(blockers) > 20:
+            print(f"  ... and {len(blockers) - 20} more")
+        try:
+            with open("data_blockers.json", "w") as f:
+                json.dump(
+                    {
+                        "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+                        "total_candidates": len(candidates),
+                        "eligible_candidates": len(eligible_candidates),
+                        "blocked_candidates": len(blockers),
+                        "blockers": blockers
+                    },
+                    f,
+                    indent=2
+                )
+            print("Blocker report written to data_blockers.json")
+        except Exception as e:
+            print(f"Could not write data_blockers.json: {e}")
+
+    if not eligible_candidates:
+        print("All candidates failed data completeness checks. Paper run aborted.")
         sys.exit(1)
+    if blockers:
+        print(f"Proceeding with {len(eligible_candidates)} eligible candidates and skipping {len(blockers)} blocked candidates.")
 
     build_analysis_input(
-        candidates, ohlcv_data, nifty_df, sector_data,
+        eligible_candidates, ohlcv_data, nifty_df, sector_data,
         sector_rs, fii_data, global_macro,
         vix_today, vix_52wk_avg, fundamentals,
         bhavcopy, results_blackout,
