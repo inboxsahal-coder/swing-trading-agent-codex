@@ -51,6 +51,13 @@ Candidates missing required inputs (`sector`, `delivery_pct`, `pe_ratio`, `debt_
 
 `main.py finalize` validates output schema before ranking and can automatically pick run-scoped files from `run_context.json`.
 
+## Timing modes (Phase 4)
+
+`main.py run` also supports `--timing-mode`:
+- `eod_strict`: run only after safe EOD window (8 PM IST), blocks market-hours and early post-close runs.
+- `post_close_fast` (default): allows post-close runs before 8 PM and flags potential partial data.
+- `manual_force`: always proceed using latest available data.
+
 ## Data quality artifacts (Phase 2)
 
 Each run now generates:
@@ -58,3 +65,15 @@ Each run now generates:
 - `data_quality_report.json` (latest pointer)
 
 Reports include per-ticker status (`COMPLETE`, `MISSING`, `STALE`, `CONFLICTED`), missing fields, source metadata, and valuation conflict checks.
+
+## Framework trust and governance artifacts (Phases 3, 5, 7)
+
+Finalize now produces:
+- `compliance_report_<run_id>.json` + `compliance_report_latest.json`
+- `recency_bias_report_<run_id>.json` + `recency_bias_report_latest.json`
+
+And persists run lifecycle metadata in SQLite `run_registry` (provider, timing mode, artifact paths, schema/compliance status, recency-bias averages).
+
+## Elliott wave policy (Phase 8)
+
+Elliott wave logic is intentionally **not** part of core signal generation in this engine. Core execution remains framework-driven (L1–L6 rubric, skip flags, and risk controls). Elliott-style methods remain optional experimental overlays only.
