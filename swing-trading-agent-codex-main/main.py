@@ -61,7 +61,8 @@ def cmd_run(paper=False):
         fetch_universe, fetch_ohlcv_batch, fetch_fii_data,
         fetch_bhavcopy, fetch_results_calendar, fetch_sector_rs,
         get_vix_avg, fetch_fundamentals, fetch_global_macro,
-        check_shadow_book_outcomes
+        check_shadow_book_outcomes, fetch_sector_classification,
+        validate_candidate_data_completeness
     )
     from data.prefilter import run_prefilter
     from engine.formatter import build_analysis_input
@@ -140,17 +141,28 @@ def cmd_run(paper=False):
     check_shadow_book_outcomes(db, config)
     watchlist_hits, watchlist_updates = check_watchlist(db, results_blackout)
 
-    fundamentals = fetch_fundamentals(
-        [c for c in all_tickers[:50]]
-    )
-
     candidates = run_prefilter(
         ohlcv_data, nifty_df, results_blackout,
         bhavcopy, watchlist_tickers, config, tier_map
     )
 
+    candidate_tickers = sorted({c["ticker"] for c in candidates if c.get("ticker")})
+    fundamentals = fetch_fundamentals(candidate_tickers)
+    dynamic_sector_map, unresolved_sectors = fetch_sector_classification(candidate_tickers)
+    sector_data = {k: v.get("sector") for k, v in dynamic_sector_map.items()}
+
+    blockers = validate_candidate_data_completeness(candidates, fundamentals, dynamic_sector_map)
+    if unresolved_sectors:
+        print(f"Data completeness blocker: unresolved sectors for {len(unresolved_sectors)} tickers")
+    if blockers:
+        print("\nDATA COMPLETENESS BLOCKERS DETECTED")
+        for item in blockers[:20]:
+            print(f"  - {item['ticker']}: missing {', '.join(item['missing'])}")
+        print("Paper run aborted. Resolve data blockers and rerun.")
+        sys.exit(1)
+
     build_analysis_input(
-        candidates, ohlcv_data, nifty_df, None,
+        candidates, ohlcv_data, nifty_df, sector_data,
         sector_rs, fii_data, global_macro,
         vix_today, vix_52wk_avg, fundamentals,
         bhavcopy, results_blackout,

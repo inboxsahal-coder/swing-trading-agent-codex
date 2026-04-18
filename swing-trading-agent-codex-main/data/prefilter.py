@@ -148,12 +148,20 @@ def run_prefilter(ohlcv_data, nifty_df, results_blackout, bhavcopy, watchlist_ti
                 if df is not None and not df.empty:
                     indicators = compute_all(df, wl)
                     if indicators:
+                        delivery_pct = None
+                        if bhavcopy is not None:
+                            try:
+                                bhav_row = bhavcopy[bhavcopy['SYMBOL'] == wl]
+                                if not bhav_row.empty:
+                                    delivery_pct = float(bhav_row['DELIV_PER'].values[0])
+                            except:
+                                pass
                         vcp = detect_vcp(df)
                         top_candidates.append({
                             "ticker": wl,
                             "tier": tier_map.get(wl, 3),
                             "rs_vs_nifty_20d": compute_rs_vs_nifty(df, nifty_df, 20) or 0,
-                            "delivery_pct": None,
+                            "delivery_pct": delivery_pct,
                             "vcp": vcp,
                             "indicators": indicators,
                             "from_watchlist": True
