@@ -403,39 +403,248 @@ def get_vix_avg():
 def fetch_fundamentals(tickers):
     results = {}
     for ticker in tickers:
+        result = {
+            "pe_ratio": None,
+            "debt_equity": None,
+            "revenue_q1": None,
+            "revenue_q2": None,
+            "revenue_q3": None,
+            "revenue_q4": None,
+            "data_date": None,
+            "data_age_days": 999,
+            "sources": []
+        }
+        ticker_ns = ticker + ".NS"
+        quarterly_values = []
         try:
-            info = yf.Ticker(ticker + ".NS").info
-            quarterly = yf.Ticker(ticker + ".NS").quarterly_financials
-            revenues = []
+            yt = yf.Ticker(ticker_ns)
+            info = yt.info or {}
+            if info.get("trailingPE") is not None:
+                result["pe_ratio"] = float(info.get("trailingPE"))
+            if info.get("debtToEquity") is not None:
+                result["debt_equity"] = float(info.get("debtToEquity"))
+            quarterly = yt.quarterly_financials
             if quarterly is not None and not quarterly.empty:
                 rev_row = None
                 for idx in quarterly.index:
-                    if 'revenue' in str(idx).lower() or 'total revenue' in str(idx).lower():
+                    idx_lower = str(idx).lower()
+                    if 'revenue' in idx_lower or 'total revenue' in idx_lower:
                         rev_row = quarterly.loc[idx]
                         break
                 if rev_row is not None:
-                    revenues = [float(v) if v and str(v) != 'nan' else None
-                                for v in rev_row.values[:4]]
-            data_date = datetime.date.today().isoformat()
-            results[ticker] = {
-                "pe_ratio": info.get("trailingPE"),
-                "debt_equity": info.get("debtToEquity"),
-                "revenue_q1": revenues[0] if len(revenues) > 0 else None,
-                "revenue_q2": revenues[1] if len(revenues) > 1 else None,
-                "revenue_q3": revenues[2] if len(revenues) > 2 else None,
-                "revenue_q4": revenues[3] if len(revenues) > 3 else None,
-                "data_date": data_date,
-                "data_age_days": 0
-            }
-            time.sleep(0.3)
-        except Exception as e:
-            results[ticker] = {
-                "pe_ratio": None, "debt_equity": None,
-                "revenue_q1": None, "revenue_q2": None,
-                "revenue_q3": None, "revenue_q4": None,
-                "data_date": None, "data_age_days": 999
-            }
+                    quarterly_values = [
+                        float(v) if pd.notna(v) else None
+                        for v in rev_row.values[:4]
+                    ]
+            result["sources"].append("yfinance")
+        except Exception:
+            pass
+
+        if len([v for v in quarterly_values if v is not None]) < 4:
+            yahoo_qs = _fetch_yahoo_quote_summary(ticker_ns)
+            qs_quarters = _extract_quarterly_revenues_from_qs(yahoo_qs)
+            if len(qs_quarters) >= 4:
+                quarterly_values = qs_quarters
+            if yahoo_qs:
+                stats = _get_qs_module(yahoo_qs, "defaultKeyStatistics")
+                fin = _get_qs_module(yahoo_qs, "financialData")
+                pe = _safe_float(_deep_get(stats, ["trailingPE", "raw"]))
+                de = _safe_float(_deep_get(fin, ["debtToEquity", "raw"]))
+                if result["pe_ratio"] is None and pe is not None:
+                    result["pe_ratio"] = pe
+                if result["debt_equity"] is None and de is not None:
+                    result["debt_equity"] = de
+                result["sources"].append("yahoo_quote_summary")
+
+        nse_quote = _fetch_nse_quote_equity(ticker)
+        if nse_quote:
+            metadata = nse_quote.get("metadata", {}) or {}
+            pe = _safe_float(metadata.get("pdSectorPe"))
+            if result["pe_ratio"] is None and pe is not None:
+                result["pe_ratio"] = pe
+            result["sources"].append("nse_quote_equity")
+
+        if quarterly_values:
+            result["revenue_q1"] = quarterly_values[0] if len(quarterly_values) > 0 else None
+            result["revenue_q2"] = quarterly_values[1] if len(quarterly_values) > 1 else None
+            result["revenue_q3"] = quarterly_values[2] if len(quarterly_values) > 2 else None
+            result["revenue_q4"] = quarterly_values[3] if len(quarterly_values) > 3 else None
+
+        required_present = (
+            result["pe_ratio"] is not None and
+            result["debt_equity"] is not None and
+            all(result.get(k) is not None for k in ["revenue_q1", "revenue_q2", "revenue_q3", "revenue_q4"])
+        )
+        if required_present:
+            result["data_date"] = datetime.date.today().isoformat()
+            result["data_age_days"] = 0
+
+        results[ticker] = result
+        time.sleep(0.15)
     return results
+
+def _safe_float(v):
+    if v is None:
+        return None
+    try:
+        if isinstance(v, str):
+            v = v.replace(",", "").strip()
+            if not v:
+                return None
+        fv = float(v)
+        if pd.isna(fv):
+            return None
+        return fv
+    except Exception:
+        return None
+
+def _fetch_yahoo_quote_summary(symbol_ns):
+    url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol_ns}"
+    params = {
+        "modules": "assetProfile,financialData,defaultKeyStatistics,incomeStatementHistoryQuarterly"
+    }
+    try:
+        r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
+        r.raise_for_status()
+        data = r.json()
+        return _deep_get(data, ["quoteSummary", "result", 0]) or {}
+    except Exception:
+        return {}
+
+def _get_qs_module(qs_payload, module_name):
+    if not isinstance(qs_payload, dict):
+        return {}
+    v = qs_payload.get(module_name)
+    return v if isinstance(v, dict) else {}
+
+def _deep_get(data, path):
+    cur = data
+    for p in path:
+        try:
+            if isinstance(p, int):
+                cur = cur[p]
+            else:
+                cur = cur.get(p)
+        except Exception:
+            return None
+        if cur is None:
+            return None
+    return cur
+
+def _extract_quarterly_revenues_from_qs(qs_payload):
+    statements = _deep_get(qs_payload, ["incomeStatementHistoryQuarterly", "incomeStatementHistory"]) or []
+    revs = []
+    for st in statements:
+        rev = _safe_float(_deep_get(st, ["totalRevenue", "raw"]))
+        if rev is not None:
+            revs.append(rev)
+    return revs[:4]
+
+def _fetch_nse_quote_equity(symbol):
+    sym = _normalize_symbol(symbol)
+    if not sym:
+        return None
+    url = f"https://www.nseindia.com/api/quote-equity?symbol={sym}"
+    return _nse_json_get(url)
+
+def _normalize_sector_name(sector_text):
+    if not sector_text:
+        return None
+    s = str(sector_text).upper()
+    mapping = [
+        ("PSU BANK", "PSU_BANK"),
+        ("BANK", "BANK"),
+        ("FINANCIAL", "BANK"),
+        ("NBFC", "BANK"),
+        ("INSURANCE", "BANK"),
+        ("INFORMATION TECHNOLOGY", "IT"),
+        ("IT", "IT"),
+        ("PHARMA", "PHARMA"),
+        ("HEALTH", "HEALTHCARE"),
+        ("FMCG", "FMCG"),
+        ("CONSUMER", "FMCG"),
+        ("AUTO", "AUTO"),
+        ("METAL", "METAL"),
+        ("STEEL", "METAL"),
+        ("OIL", "ENERGY"),
+        ("GAS", "ENERGY"),
+        ("POWER", "ENERGY"),
+        ("ENERGY", "ENERGY"),
+        ("REALTY", "REALTY"),
+        ("CEMENT", "INFRA"),
+        ("INFRA", "INFRA"),
+        ("CAPITAL GOODS", "INFRA"),
+        ("DEFENCE", "DEFENCE"),
+        ("AEROSPACE", "DEFENCE"),
+    ]
+    for keyword, normalized in mapping:
+        if keyword in s:
+            return normalized
+    return None
+
+def fetch_sector_classification(tickers):
+    sectors = {}
+    unresolved = []
+    for ticker in tickers:
+        sector = None
+        source = None
+        nse_q = _fetch_nse_quote_equity(ticker)
+        if nse_q:
+            metadata = nse_q.get("metadata", {}) or {}
+            info = nse_q.get("info", {}) or {}
+            sector_text = metadata.get("industry") or info.get("industry") or info.get("companyName")
+            sector = _normalize_sector_name(sector_text)
+            if sector:
+                source = "nse_quote_equity"
+        if not sector:
+            qs = _fetch_yahoo_quote_summary(ticker + ".NS")
+            asset = _get_qs_module(qs, "assetProfile")
+            sector = _normalize_sector_name(asset.get("sector"))
+            if sector:
+                source = "yahoo_quote_summary"
+        if not sector:
+            try:
+                info = yf.Ticker(ticker + ".NS").info or {}
+                sector = _normalize_sector_name(info.get("sector"))
+                if sector:
+                    source = "yfinance"
+            except Exception:
+                pass
+        if sector:
+            sectors[ticker] = {"sector": sector, "source": source}
+        else:
+            unresolved.append(ticker)
+        time.sleep(0.1)
+    return sectors, unresolved
+
+def validate_candidate_data_completeness(candidates, fundamentals, dynamic_sectors):
+    blockers = []
+    sector_lookup = {}
+    for ticker, payload in (dynamic_sectors or {}).items():
+        if isinstance(payload, dict):
+            sector_lookup[ticker] = payload.get("sector")
+        else:
+            sector_lookup[ticker] = payload
+    for c in candidates:
+        ticker = c.get("ticker")
+        fund = fundamentals.get(ticker, {})
+        missing = []
+        if not ticker:
+            continue
+        if c.get("delivery_pct") is None:
+            missing.append("delivery_pct")
+        if not sector_lookup.get(ticker):
+            missing.append("sector")
+        if fund.get("pe_ratio") is None:
+            missing.append("pe_ratio")
+        if fund.get("debt_equity") is None:
+            missing.append("debt_equity")
+        for q in ["revenue_q1", "revenue_q2", "revenue_q3", "revenue_q4"]:
+            if fund.get(q) is None:
+                missing.append(q)
+        if missing:
+            blockers.append({"ticker": ticker, "missing": missing})
+    return blockers
 
 def fetch_news(ticker):
     try:

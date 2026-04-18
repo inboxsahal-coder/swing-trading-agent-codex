@@ -25,3 +25,19 @@ By default, paper mode is considered ready for live only after:
 
 This threshold is configurable in `config.yaml` via:
 - `paper_mode_go_nogo_threshold_pct`
+
+## Data completeness policy (strict gate)
+
+Paper runs now use multi-source enrichment and a hard completeness gate before `analysis_input.json` is generated:
+
+1. **Fundamentals (PE, D/E, quarterly revenue)** are fetched via ordered fallback:
+   - yfinance
+   - Yahoo Quote Summary endpoint
+   - NSE Quote Equity metadata (PE fallback)
+2. **Sector classification** is fetched via ordered fallback:
+   - NSE Quote Equity (industry metadata)
+   - Yahoo Quote Summary (asset profile sector)
+   - yfinance sector
+3. **Delivery %** is fetched from Bhavcopy.
+
+If any candidate is missing required inputs (`sector`, `delivery_pct`, `pe_ratio`, `debt_equity`, `revenue_q1..q4`), the run aborts with a blocker report and does not proceed to paper testing.
