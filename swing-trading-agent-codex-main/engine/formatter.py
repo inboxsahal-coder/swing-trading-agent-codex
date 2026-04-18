@@ -85,7 +85,8 @@ def build_analysis_input(
     open_positions,
     config,
     capital=None,
-    theme_map=None
+    theme_map=None,
+    run_metadata=None
 ):
     if theme_map is None:
         theme_map = {}
@@ -223,6 +224,8 @@ def build_analysis_input(
     output = {
         "date": datetime.date.today().isoformat(),
         "run_time": datetime.datetime.now().strftime("%H:%M"),
+        "run_id": (run_metadata or {}).get("run_id"),
+        "schema_version": (run_metadata or {}).get("schema_version", "1.1"),
         "capital": capital,
         "phase": phase,
         "phase_limits": {

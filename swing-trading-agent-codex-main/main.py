@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import datetime
+import shutil
 
 def _import_or_none(module_name):
     try:
@@ -51,10 +52,20 @@ def prompt_capital():
         print("Invalid capital input. Exiting.")
         sys.exit(1)
 
-def cmd_run(paper=False):
+def cmd_run(paper=False, provider="chatgpt_project"):
     market_hours_guard()
     config = load_config()
     capital = prompt_capital()
+
+    from engine.handoff import (
+        generate_run_id,
+        file_sha256,
+        write_run_context,
+        write_analysis_request_markdown,
+    )
+
+    run_id = generate_run_id()
+    schema_version = "1.1"
 
     from db.database import init_db, get_open_positions, get_active_watchlist
     from data.fetch import (
@@ -191,20 +202,44 @@ def cmd_run(paper=False):
         vix_today, vix_52wk_avg, fundamentals,
         bhavcopy, results_blackout,
         active_watchlist, open_positions, config,
-        capital=capital
+        capital=capital,
+        run_metadata={"run_id": run_id, "schema_version": schema_version}
     )
 
+    analysis_input_hash = file_sha256("analysis_input.json")
+    expected_output = f"analysis_output_{run_id}.json" if provider == "chatgpt_project" else "analysis_output.json"
+    run_context = {
+        "run_id": run_id,
+        "schema_version": schema_version,
+        "provider": provider,
+        "paper": paper,
+        "analysis_input_path": "analysis_input.json",
+        "analysis_input_sha256": analysis_input_hash,
+        "expected_analysis_output_path": expected_output,
+        "created_at_utc": datetime.datetime.utcnow().isoformat() + "Z",
+    }
+    write_run_context(run_context)
+    request_doc = write_analysis_request_markdown(run_context)
+
     print("\n" + "=" * 60)
-    print("analysis_input.json is ready.")
-    print("Now open a NEW Codex session in this directory and say:")
-    print("  Read CODEX.md and analysis_input.json, perform analysis, write analysis_output.json")
-    print("After Codex writes analysis_output.json, come back and run:")
+    print(f"analysis_input.json is ready. run_id={run_id}")
+    print(f"Provider mode: {provider}")
+    print(f"Run context saved: run_context.json")
+    print(f"Analysis request saved: {request_doc}")
+    if provider == "chatgpt_project":
+        print("Use your ChatGPT Project and provide CODEX.md + analysis_input.json.")
+        print(f"Ask it to write: {expected_output}")
+    else:
+        print("Use local analysis workflow and write analysis_output.json")
+    print("After analysis output file is written, run:")
     print("  python main.py finalize --paper" if paper else "  python main.py finalize")
     print("=" * 60 + "\n")
 
 def cmd_finalize(paper=False):
     config = load_config()
     capital = prompt_capital()
+
+    from engine.handoff import load_run_context, validate_analysis_output
 
     from db.database import init_db, get_open_positions, log_signal
     from engine.ranker import load_and_rank
@@ -213,9 +248,34 @@ def cmd_finalize(paper=False):
 
     init_db()
 
-    if not os.path.exists("analysis_output.json"):
-        print("analysis_output.json not found. Run Codex analysis first.")
+    run_context = load_run_context() or {}
+    expected_run_id = run_context.get("run_id")
+    candidate_outputs = []
+    if run_context.get("expected_analysis_output_path"):
+        candidate_outputs.append(run_context["expected_analysis_output_path"])
+    if expected_run_id:
+        candidate_outputs.append(f"analysis_output_{expected_run_id}.json")
+    candidate_outputs.append("analysis_output.json")
+
+    selected_output = next((p for p in candidate_outputs if p and os.path.exists(p)), None)
+    if not selected_output:
+        print("No analysis output file found.")
+        print("Expected one of:")
+        for p in candidate_outputs:
+            if p:
+                print(f"  - {p}")
         sys.exit(1)
+
+    ok, errors, _ = validate_analysis_output(selected_output, expected_run_id=expected_run_id)
+    if not ok:
+        print(f"analysis output validation failed for {selected_output}")
+        for e in errors:
+            print(f"  - {e}")
+        sys.exit(1)
+
+    if selected_output != "analysis_output.json":
+        shutil.copyfile(selected_output, "analysis_output.json")
+        print(f"Using {selected_output} for finalize (copied to analysis_output.json)")
 
     open_positions = get_open_positions(paper=paper)
     analysis = load_and_rank(capital, config, open_positions, paper=paper)
@@ -500,8 +560,8 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     if not args:
         print("Usage:")
-        print("  python main.py run           — full EOD run")
-        print("  python main.py run --paper   — paper trading mode")
+        print("  python main.py run [--provider chatgpt_project|local_file]         — full EOD run")
+        print("  python main.py run --paper [--provider chatgpt_project|local_file] — paper trading mode")
         print("  python main.py finalize      — after Codex writes analysis_output.json")
         print("  python main.py finalize --paper")
         print("  python main.py portfolio     — portfolio check")
@@ -519,7 +579,18 @@ if __name__ == "__main__":
     try:
         if cmd == "run":
             paper = "--paper" in args
-            cmd_run(paper=paper)
+            provider = "chatgpt_project"
+            if "--provider" in args:
+                i = args.index("--provider")
+                if i + 1 >= len(args):
+                    print("Usage: python main.py run [--paper] [--provider chatgpt_project|local_file]")
+                    sys.exit(1)
+                provider = args[i + 1].strip().lower()
+            if provider not in ("chatgpt_project", "local_file"):
+                print(f"Unsupported provider: {provider}")
+                print("Allowed: chatgpt_project, local_file")
+                sys.exit(1)
+            cmd_run(paper=paper, provider=provider)
         elif cmd == "finalize":
             paper = "--paper" in args
             cmd_finalize(paper=paper)
