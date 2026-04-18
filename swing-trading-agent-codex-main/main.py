@@ -63,6 +63,7 @@ def cmd_run(paper=False, provider="chatgpt_project"):
         write_run_context,
         write_analysis_request_markdown,
     )
+    from engine.data_quality import build_data_quality_report, write_data_quality_report
 
     run_id = generate_run_id()
     schema_version = "1.1"
@@ -196,6 +197,31 @@ def cmd_run(paper=False, provider="chatgpt_project"):
     if blockers:
         print(f"Proceeding with {len(eligible_candidates)} eligible candidates and skipping {len(blockers)} blocked candidates.")
 
+    dq_report = build_data_quality_report(
+        run_id=run_id,
+        candidates=candidates,
+        fundamentals=fundamentals,
+        dynamic_sectors=dynamic_sector_map,
+        blockers=blockers,
+    )
+    dq_run_path = f"data_quality_report_{run_id}.json"
+    write_data_quality_report(dq_report, dq_run_path)
+    write_data_quality_report(dq_report, "data_quality_report.json")
+    dq_summary = {
+        "status": dq_report.get("overall_status"),
+        "complete": "COMPLETE" if dq_report.get("summary", {}).get("complete", 0) > 0 else "PARTIAL",
+        "missing": "COMPLETE" if dq_report.get("summary", {}).get("missing", 0) == 0 else "PARTIAL",
+        "stale": "COMPLETE" if dq_report.get("summary", {}).get("stale", 0) == 0 else "PARTIAL",
+        "conflicted": "COMPLETE" if dq_report.get("summary", {}).get("conflicted", 0) == 0 else "PARTIAL",
+    }
+    print(
+        "Data quality summary:",
+        f"status={dq_report.get('overall_status')},",
+        f"missing={dq_report.get('summary', {}).get('missing', 0)},",
+        f"stale={dq_report.get('summary', {}).get('stale', 0)},",
+        f"conflicted={dq_report.get('summary', {}).get('conflicted', 0)}",
+    )
+
     build_analysis_input(
         eligible_candidates, ohlcv_data, nifty_df, sector_data,
         sector_rs, fii_data, global_macro,
@@ -203,7 +229,8 @@ def cmd_run(paper=False, provider="chatgpt_project"):
         bhavcopy, results_blackout,
         active_watchlist, open_positions, config,
         capital=capital,
-        run_metadata={"run_id": run_id, "schema_version": schema_version}
+        run_metadata={"run_id": run_id, "schema_version": schema_version},
+        data_quality=dq_summary
     )
 
     analysis_input_hash = file_sha256("analysis_input.json")
@@ -216,6 +243,7 @@ def cmd_run(paper=False, provider="chatgpt_project"):
         "analysis_input_path": "analysis_input.json",
         "analysis_input_sha256": analysis_input_hash,
         "expected_analysis_output_path": expected_output,
+        "data_quality_report_path": dq_run_path,
         "created_at_utc": datetime.datetime.utcnow().isoformat() + "Z",
     }
     write_run_context(run_context)

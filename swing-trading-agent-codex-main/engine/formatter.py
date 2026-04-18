@@ -86,7 +86,8 @@ def build_analysis_input(
     config,
     capital=None,
     theme_map=None,
-    run_metadata=None
+    run_metadata=None,
+    data_quality=None
 ):
     if theme_map is None:
         theme_map = {}
@@ -234,6 +235,7 @@ def build_analysis_input(
         },
         "current_open_positions": len(open_positions),
         "market_context": market_context,
+        "data_quality": data_quality or {},
         "candidates": candidate_list,
         "watchlist_items": watchlist_items,
         "mcx_gold": mcx_gold,

@@ -50,3 +50,11 @@ Candidates missing required inputs (`sector`, `delivery_pct`, `pe_ratio`, `debt_
 - `--provider local_file`: keeps legacy behavior and expects `analysis_output.json`.
 
 `main.py finalize` validates output schema before ranking and can automatically pick run-scoped files from `run_context.json`.
+
+## Data quality artifacts (Phase 2)
+
+Each run now generates:
+- `data_quality_report_<run_id>.json` (run-scoped)
+- `data_quality_report.json` (latest pointer)
+
+Reports include per-ticker status (`COMPLETE`, `MISSING`, `STALE`, `CONFLICTED`), missing fields, source metadata, and valuation conflict checks.
