@@ -11,8 +11,9 @@
 3. Run system checks:
    - `python main.py status`
 4. Run paper flow:
-   - `python main.py run --paper`
-   - complete analysis in Codex using `analysis_input.json`
+   - `python main.py run --paper --provider chatgpt_project`
+   - complete analysis in your ChatGPT Project using `CODEX.md` + `analysis_input.json`
+   - write output to `analysis_output_<run_id>.json` using the `run_id` shown in terminal (also saved in `run_context.json`)
    - `python main.py finalize --paper`
 5. Track readiness for live deployment:
    - `python main.py metrics`
@@ -41,3 +42,38 @@ Paper runs now use multi-source enrichment and a hard completeness gate before `
 3. **Delivery %** is fetched from Bhavcopy.
 
 Candidates missing required inputs (`sector`, `delivery_pct`, `pe_ratio`, `debt_equity`, `revenue_q1..q4`) are skipped, logged to `data_blockers.json`, and excluded from `analysis_input.json`. The run only aborts when **all** candidates are blocked.
+
+## Analysis provider modes
+
+`main.py run` supports:
+- `--provider chatgpt_project` (default): produces a run-scoped handoff (`run_context.json`, `analysis_request_<run_id>.md`) and expects analysis output in `analysis_output_<run_id>.json`.
+- `--provider local_file`: keeps legacy behavior and expects `analysis_output.json`.
+
+`main.py finalize` validates output schema before ranking and can automatically pick run-scoped files from `run_context.json`.
+
+## Timing modes (Phase 4)
+
+`main.py run` also supports `--timing-mode`:
+- `eod_strict`: run only after safe EOD window (8 PM IST), blocks market-hours and early post-close runs.
+- `post_close_fast` (default): allows post-close runs before 8 PM and flags potential partial data.
+- `manual_force`: always proceed using latest available data.
+
+## Data quality artifacts (Phase 2)
+
+Each run now generates:
+- `data_quality_report_<run_id>.json` (run-scoped)
+- `data_quality_report.json` (latest pointer)
+
+Reports include per-ticker status (`COMPLETE`, `MISSING`, `STALE`, `CONFLICTED`), missing fields, source metadata, and valuation conflict checks.
+
+## Framework trust and governance artifacts (Phases 3, 5, 7)
+
+Finalize now produces:
+- `compliance_report_<run_id>.json` + `compliance_report_latest.json`
+- `recency_bias_report_<run_id>.json` + `recency_bias_report_latest.json`
+
+And persists run lifecycle metadata in SQLite `run_registry` (provider, timing mode, artifact paths, schema/compliance status, recency-bias averages).
+
+## Elliott wave policy (Phase 8)
+
+Elliott wave logic is intentionally **not** part of core signal generation in this engine. Core execution remains framework-driven (L1–L6 rubric, skip flags, and risk controls). Elliott-style methods remain optional experimental overlays only.

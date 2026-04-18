@@ -412,7 +412,9 @@ def fetch_fundamentals(tickers):
             "revenue_q4": None,
             "data_date": None,
             "data_age_days": 999,
-            "sources": []
+            "sources": [],
+            "pe_candidates": [],
+            "de_candidates": []
         }
         ticker_ns = ticker + ".NS"
         quarterly_values = []
@@ -420,9 +422,13 @@ def fetch_fundamentals(tickers):
             yt = yf.Ticker(ticker_ns)
             info = yt.info or {}
             if info.get("trailingPE") is not None:
-                result["pe_ratio"] = float(info.get("trailingPE"))
+                y_pe = float(info.get("trailingPE"))
+                result["pe_ratio"] = y_pe
+                result["pe_candidates"].append({"source": "yfinance", "value": y_pe})
             if info.get("debtToEquity") is not None:
-                result["debt_equity"] = float(info.get("debtToEquity"))
+                y_de = float(info.get("debtToEquity"))
+                result["debt_equity"] = y_de
+                result["de_candidates"].append({"source": "yfinance", "value": y_de})
             quarterly = yt.quarterly_financials
             if quarterly is not None and not quarterly.empty:
                 rev_row = None
@@ -450,6 +456,10 @@ def fetch_fundamentals(tickers):
                 fin = _get_qs_module(yahoo_qs, "financialData")
                 pe = _safe_float(_deep_get(stats, ["trailingPE", "raw"]))
                 de = _safe_float(_deep_get(fin, ["debtToEquity", "raw"]))
+                if pe is not None:
+                    result["pe_candidates"].append({"source": "yahoo_quote_summary", "value": pe})
+                if de is not None:
+                    result["de_candidates"].append({"source": "yahoo_quote_summary", "value": de})
                 if result["pe_ratio"] is None and pe is not None:
                     result["pe_ratio"] = pe
                 if result["debt_equity"] is None and de is not None:
@@ -460,6 +470,8 @@ def fetch_fundamentals(tickers):
         if nse_quote:
             metadata = nse_quote.get("metadata", {}) or {}
             pe = _safe_float(metadata.get("pdSectorPe"))
+            if pe is not None:
+                result["pe_candidates"].append({"source": "nse_quote_equity", "value": pe})
             if result["pe_ratio"] is None and pe is not None:
                 result["pe_ratio"] = pe
             result["sources"].append("nse_quote_equity")
