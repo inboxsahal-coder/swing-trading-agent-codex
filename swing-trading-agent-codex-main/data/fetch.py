@@ -2,6 +2,7 @@ import os
 import json
 import time
 import datetime
+import random
 import pandas as pd
 import yfinance as yf
 import requests
@@ -78,6 +79,21 @@ def _nse_json_get(url, timeout=15):
             return resp.json()
     except Exception:
         return None
+
+def _with_retries(fetch_fn, attempts=3, base_sleep=0.8):
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        try:
+            val = fetch_fn()
+            if val is not None:
+                return val
+        except Exception as e:
+            last_err = e
+        if attempt < attempts:
+            time.sleep(base_sleep * attempt + random.uniform(0, 0.4))
+    if last_err:
+        raise last_err
+    return None
 
 def fetch_universe():
     if NSE_AVAILABLE:
@@ -287,10 +303,22 @@ def fetch_bhavcopy():
     today = datetime.date.today()
     cache_path = f"data/cache/bhavcopy_{today}.csv"
     if os.path.exists(cache_path):
-        return pd.read_csv(cache_path)
+        try:
+            cached = pd.read_csv(cache_path)
+            if cached is None or cached.empty or len(getattr(cached, "columns", [])) == 0:
+                raise ValueError("cached bhavcopy is empty")
+            return cached
+        except Exception as e:
+            print(f"Bhavcopy cache invalid ({cache_path}): {e}. Re-fetching.")
+            try:
+                os.remove(cache_path)
+            except Exception:
+                pass
     if NSE_AVAILABLE:
         try:
             bhav = nse.get_equity_bhav_copy(datetime.datetime.now())
+            if bhav is None or bhav.empty:
+                raise ValueError("nsefin returned empty bhavcopy")
             bhav.to_csv(cache_path, index=False)
             print("Bhavcopy fetched via nsefin")
             return bhav
@@ -302,6 +330,8 @@ def fetch_bhavcopy():
             date_str = dt.strftime("%d%m%Y")
             url = f"https://archives.nseindia.com/products/content/sec_bhavdata_full_{date_str}.csv"
             df = pd.read_csv(url, dtype=str, storage_options={"User-Agent": "Mozilla/5.0"})
+            if df is None or df.empty:
+                continue
             # normalize columns by stripping spaces from legacy files
             df.columns = [str(c).strip() for c in df.columns]
             df.to_csv(cache_path, index=False)
@@ -516,10 +546,12 @@ def _fetch_yahoo_quote_summary(symbol_ns):
         "modules": "assetProfile,financialData,defaultKeyStatistics,incomeStatementHistoryQuarterly"
     }
     try:
-        r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
-        r.raise_for_status()
-        data = r.json()
-        return _deep_get(data, ["quoteSummary", "result", 0]) or {}
+        def _go():
+            r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
+            r.raise_for_status()
+            data = r.json()
+            return _deep_get(data, ["quoteSummary", "result", 0]) or {}
+        return _with_retries(_go, attempts=3, base_sleep=0.7) or {}
     except Exception:
         return {}
 
@@ -588,6 +620,19 @@ def _normalize_sector_name(sector_text):
         ("CAPITAL GOODS", "INFRA"),
         ("DEFENCE", "DEFENCE"),
         ("AEROSPACE", "DEFENCE"),
+        ("CHEMICAL", "CHEMICALS"),
+        ("TEXTILE", "TEXTILES"),
+        ("TELECOM", "TELECOM"),
+        ("MEDIA", "MEDIA"),
+        ("LOGISTICS", "LOGISTICS"),
+        ("TRANSPORT", "LOGISTICS"),
+        ("RETAIL", "CONSUMPTION"),
+        ("CONSUMPTION", "CONSUMPTION"),
+        ("CONSUMER DURABLE", "CONSUMPTION"),
+        ("HOTEL", "HOSPITALITY"),
+        ("TRAVEL", "HOSPITALITY"),
+        ("AGRI", "AGRI"),
+        ("FERTILIZER", "AGRI"),
     ]
     for keyword, normalized in mapping:
         if keyword in s:
@@ -625,11 +670,18 @@ def fetch_sector_classification(tickers):
         if sector:
             sectors[ticker] = {"sector": sector, "source": source}
         else:
+            sectors[ticker] = {"sector": "MISC", "source": "fallback_misc"}
             unresolved.append(ticker)
         time.sleep(0.1)
     return sectors, unresolved
 
-def validate_candidate_data_completeness(candidates, fundamentals, dynamic_sectors):
+def validate_candidate_data_completeness(
+    candidates,
+    fundamentals,
+    dynamic_sectors,
+    require_delivery=True,
+    require_sector=True
+):
     blockers = []
     sector_lookup = {}
     for ticker, payload in (dynamic_sectors or {}).items():
@@ -643,9 +695,9 @@ def validate_candidate_data_completeness(candidates, fundamentals, dynamic_secto
         missing = []
         if not ticker:
             continue
-        if c.get("delivery_pct") is None:
+        if require_delivery and c.get("delivery_pct") is None:
             missing.append("delivery_pct")
-        if not sector_lookup.get(ticker):
+        if require_sector and not sector_lookup.get(ticker):
             missing.append("sector")
         if fund.get("pe_ratio") is None:
             missing.append("pe_ratio")
