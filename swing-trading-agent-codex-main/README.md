@@ -43,6 +43,17 @@ Paper runs now use multi-source enrichment and a hard completeness gate before `
 
 Candidates missing required inputs (`sector`, `delivery_pct`, `pe_ratio`, `debt_equity`, `revenue_q1..q4`) are skipped, logged to `data_blockers.json`, and excluded from `analysis_input.json`. The run only aborts when **all** candidates are blocked.
 
+Completeness strictness is configurable:
+- `require_delivery_pct` (default: `false`)
+- `require_sector_classification` (default: `false`)
+
+If strict mode blocks all symbols, the engine automatically retries in graceful mode before aborting.
+
+For paper runs, an additional safety fallback is enabled by default:
+- `allow_best_effort_when_all_blocked` (default: `true`)
+
+If strict + graceful both block all candidates, paper mode can still proceed with best-effort analysis on the original candidate set.
+
 ## Analysis provider modes
 
 `main.py run` supports:
@@ -77,3 +88,9 @@ And persists run lifecycle metadata in SQLite `run_registry` (provider, timing m
 ## Elliott wave policy (Phase 8)
 
 Elliott wave logic is intentionally **not** part of core signal generation in this engine. Core execution remains framework-driven (L1–L6 rubric, skip flags, and risk controls). Elliott-style methods remain optional experimental overlays only.
+
+## Universe mode
+
+Set `universe_mode` in config:
+- `full` (default): analyze full fetched universe after basic data sanity checks.
+- `prefiltered`: apply strict momentum pre-filters and cap to top 25 by RS (legacy behavior).
