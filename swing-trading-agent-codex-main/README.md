@@ -40,8 +40,20 @@ Paper runs now use multi-source enrichment and a hard completeness gate before `
    - Yahoo Quote Summary (asset profile sector)
    - yfinance sector
 3. **Delivery %** is fetched from Bhavcopy.
+   - If live/archive fetch fails, the engine reuses the latest non-empty local Bhavcopy cache as a fallback.
 
 Candidates missing required inputs (`sector`, `delivery_pct`, `pe_ratio`, `debt_equity`, `revenue_q1..q4`) are skipped, logged to `data_blockers.json`, and excluded from `analysis_input.json`. The run only aborts when **all** candidates are blocked.
+
+Completeness strictness is configurable:
+- `require_delivery_pct` (default: `false`)
+- `require_sector_classification` (default: `false`)
+
+If strict mode blocks all symbols, the engine automatically retries in graceful mode before aborting.
+
+For paper runs, an additional safety fallback is enabled by default:
+- `allow_best_effort_when_all_blocked` (default: `true`)
+
+If strict + graceful both block all candidates, paper mode can still proceed with best-effort analysis on the original candidate set.
 
 ## Analysis provider modes
 
@@ -77,3 +89,29 @@ And persists run lifecycle metadata in SQLite `run_registry` (provider, timing m
 ## Elliott wave policy (Phase 8)
 
 Elliott wave logic is intentionally **not** part of core signal generation in this engine. Core execution remains framework-driven (L1–L6 rubric, skip flags, and risk controls). Elliott-style methods remain optional experimental overlays only.
+
+## Universe mode
+
+Set `universe_mode` in config:
+- `full` (default): analyze full fetched universe after basic data sanity checks.
+- `prefiltered`: apply strict momentum pre-filters and cap to top 25 by RS (legacy behavior).
+
+## Storyline / catalyst weight in ranking
+
+For swing/momentum setups, ranking now supports catalyst weightage when analysis output includes:
+- `storyline_score` (0..10)
+- `storyline_notes` (short catalyst description)
+
+Ranking uses:
+- `composite_rank_score = research_score + storyline_weight * storyline_score`
+
+Config:
+- `storyline_weight` (default: `0.35`)
+
+## Merge-conflict safe workflow
+
+To avoid repeated PR conflicts on hot files (`main.py`, `data/fetch.py`, `data/prefilter.py`):
+1. Branch from latest `main`.
+2. Keep PR scope narrow (one concern per PR).
+3. Rebase your branch on latest `main` before opening/reviewing PR.
+4. Prefer landing conflict-prone runtime changes via a single integration PR.

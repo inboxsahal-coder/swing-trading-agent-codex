@@ -35,8 +35,23 @@ def apply_position_sizing(candidates, capital, market_state, config, open_positi
     heat_limit = capital * monthly_loss_limit
     heat_remaining = heat_limit - total_heat
 
+    storyline_weight = float(config.get("storyline_weight", 0.35))
+
+    def _num(val, default=0.0):
+        try:
+            return float(val)
+        except Exception:
+            return float(default)
+
+    def _composite_rank_score(c):
+        research_score = _num(c.get("research_score"), 0.0)
+        storyline_score = _num(c.get("storyline_score"), 0.0)
+        return research_score + (storyline_weight * storyline_score)
+
     buy_signals = [c for c in candidates if c.get('signal') == 'BUY' and not c.get('skip_flags')]
-    buy_signals.sort(key=lambda x: x.get('research_score', 0), reverse=True)
+    for c in buy_signals:
+        c["composite_rank_score"] = round(_composite_rank_score(c), 2)
+    buy_signals.sort(key=lambda x: (x.get("composite_rank_score", 0), x.get("research_score", 0)), reverse=True)
 
     ranked = []
     slots_used = 0
