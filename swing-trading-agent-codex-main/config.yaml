@@ -21,6 +21,10 @@ watchlist_expiry_trading_days: 5
 shadow_book_tracking_days: 15
 learning_loop_trigger_trades: 20
 paper_mode_go_nogo_threshold_pct: 50.0
+require_delivery_pct: false
+require_sector_classification: false
+allow_best_effort_when_all_blocked: true
+storyline_weight: 0.35
 sector_pe_medians:
   IT: 28
   BANK: 14
