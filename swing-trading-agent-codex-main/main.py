@@ -78,6 +78,7 @@ def cmd_run(paper=False, provider="chatgpt_project", timing_mode="post_close_fas
 
     run_id = generate_run_id()
     schema_version = "1.1"
+    utc_now = datetime.datetime.now(datetime.timezone.utc)
 
     from db.database import init_db, get_open_positions, get_active_watchlist
     from data.fetch import (
@@ -174,7 +175,15 @@ def cmd_run(paper=False, provider="chatgpt_project", timing_mode="post_close_fas
     dynamic_sector_map, unresolved_sectors = fetch_sector_classification(candidate_tickers)
     sector_data = {k: v.get("sector") for k, v in dynamic_sector_map.items()}
 
-    blockers = validate_candidate_data_completeness(candidates, fundamentals, dynamic_sector_map)
+    strict_require_delivery = bool(config.get("require_delivery_pct", False))
+    strict_require_sector = bool(config.get("require_sector_classification", False))
+    blockers = validate_candidate_data_completeness(
+        candidates,
+        fundamentals,
+        dynamic_sector_map,
+        require_delivery=strict_require_delivery,
+        require_sector=strict_require_sector
+    )
     blocked_tickers = {item.get("ticker") for item in blockers if item.get("ticker")}
     eligible_candidates = [c for c in candidates if c.get("ticker") not in blocked_tickers]
     if unresolved_sectors:
@@ -189,7 +198,7 @@ def cmd_run(paper=False, provider="chatgpt_project", timing_mode="post_close_fas
             with open("data_blockers.json", "w") as f:
                 json.dump(
                     {
-                        "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+                        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                         "total_candidates": len(candidates),
                         "eligible_candidates": len(eligible_candidates),
                         "blocked_candidates": len(blockers),
@@ -203,8 +212,25 @@ def cmd_run(paper=False, provider="chatgpt_project", timing_mode="post_close_fas
             print(f"Could not write data_blockers.json: {e}")
 
     if not eligible_candidates:
-        print("All candidates failed data completeness checks. Paper run aborted.")
-        sys.exit(1)
+        print("All candidates blocked under strict completeness policy. Retrying in graceful mode...")
+        blockers = validate_candidate_data_completeness(
+            candidates,
+            fundamentals,
+            dynamic_sector_map,
+            require_delivery=False,
+            require_sector=False
+        )
+        blocked_tickers = {item.get("ticker") for item in blockers if item.get("ticker")}
+        eligible_candidates = [c for c in candidates if c.get("ticker") not in blocked_tickers]
+        if not eligible_candidates:
+            if paper and bool(config.get("allow_best_effort_when_all_blocked", True)):
+                print("All candidates blocked even in graceful mode.")
+                print("BEST-EFFORT PAPER OVERRIDE: continuing with original candidate set for analysis.")
+                eligible_candidates = list(candidates)
+                blockers = []
+            else:
+                print("All candidates failed even in graceful mode. Paper run aborted.")
+                sys.exit(1)
     if blockers:
         print(f"Proceeding with {len(eligible_candidates)} eligible candidates and skipping {len(blockers)} blocked candidates.")
 
@@ -256,7 +282,7 @@ def cmd_run(paper=False, provider="chatgpt_project", timing_mode="post_close_fas
         "analysis_input_sha256": analysis_input_hash,
         "expected_analysis_output_path": expected_output,
         "data_quality_report_path": dq_run_path,
-        "created_at_utc": datetime.datetime.utcnow().isoformat() + "Z",
+        "created_at_utc": utc_now.isoformat(),
     }
     write_run_context(run_context)
     upsert_run_registry({
@@ -354,7 +380,7 @@ def cmd_finalize(paper=False):
         upsert_run_registry({
             "run_id": expected_run_id or "unknown",
             "created_at_utc": None,
-            "finalized_at_utc": datetime.datetime.utcnow().isoformat() + "Z",
+            "finalized_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "paper": 1 if paper else 0,
             "provider": (run_context or {}).get("provider"),
             "timing_mode": (run_context or {}).get("timing_mode"),
@@ -443,7 +469,7 @@ def cmd_finalize(paper=False):
     upsert_run_registry({
         "run_id": expected_run_id or "unknown",
         "created_at_utc": None,
-        "finalized_at_utc": datetime.datetime.utcnow().isoformat() + "Z",
+        "finalized_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "paper": 1 if paper else 0,
         "provider": (run_context or {}).get("provider"),
         "timing_mode": (run_context or {}).get("timing_mode"),
